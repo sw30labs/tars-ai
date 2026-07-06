@@ -1,29 +1,19 @@
-# TARS-AI — MLX Native Dependencies
-# Requires: macOS on Apple Silicon (M1/M2/M3/M4)
+# TARS-AI — fully OMLX-backed (LLM + TTS on the OMLX server)
+# Requires: a running OMLX server serving both the LLM and a Qwen3-TTS model.
+# The client itself needs no MLX / Apple Silicon — only audio playback.
 
-# ── MLX Inference ──
-mlx>=0.22.0                      # Apple MLX framework
-mlx-lm>=0.21.0                   # Local LLM inference (Llama, Mistral, etc.)
-mlx-audio>=0.3.0                 # Local TTS (Qwen3-TTS, Kokoro, Bark, etc.)
+# ── OMLX server client (OpenAI-compatible: chat + /v1/audio/speech) ──
+openai>=1.0.0                    # Client for the local OMLX server (Bearer-auth /v1)
 
 # ── Agent Framework ──
 langchain-core>=0.3.0            # Message types & base abstractions
 langgraph>=0.2.0                 # Graph-based stateful agents
 
-# ── MLX Server Mode (optional — only needed with --server) ──
-openai>=1.0.0                    # OpenAI-compatible client for local MLX server
-
-# ── Audio ──
+# ── Audio playback (local, cross-platform) ──
 sounddevice>=0.4.6               # Audio playback
-soundfile>=0.12.1                # Audio file I/O (WAV read/write)
-numpy>=1.24.0                    # Numerical arrays
-lameenc>=1.7.0                   # MP3 encoding (narrate.py)
+soundfile>=0.12.1                # Reads the WAV returned by OMLX
+numpy>=1.24.0                    # Array backing for sounddevice/soundfile
 
 # ── UI & Config ──
-pydantic>=2.0.0                  # Data validation
 rich>=13.0.0                     # Console UI / pretty printing
 pyyaml>=6.0                      # Prompt template loading
-
-# ── Utilities ──
-transformers>=4.40.0             # Tokenizer support for chat templates
-huggingface_hub>=0.20.0          # Model downloads

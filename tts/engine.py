@@ -1,11 +1,13 @@
 """
-TARS Voice Synthesis Engine — MLX Native (Qwen3-TTS Voice Design)
+TARS Voice Synthesis Engine — OMLX audio (Qwen3-TTS Voice Design)
 
-Local TTS on Apple Silicon via mlx-audio.
-Model: Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16 — text-described voice design.
-Voice: Generated from text descriptions (e.g. "deep authoritative American male").
+TTS runs on the OMLX server via its OpenAI-compatible `POST /v1/audio/speech`
+endpoint — the same server (and OpenAI SDK client) that serves the LLM. TARS's
+voice *description* is sent as the OpenAI `voice` field; oMLX maps it to the
+model's `instruct` for VoiceDesign TTS models. OMLX returns a WAV, which we play
+back locally (sounddevice, with afplay / mpv / ffplay fallbacks).
 
-No cloud APIs. No latency. No API keys.
+No local model download — the TTS model lives on OMLX.
 """
 
 from __future__ import annotations
@@ -16,8 +18,6 @@ import time
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
-
 from config.settings import TARSConfig
 
 _SENTINEL = None  # poison pill to stop the playback thread
@@ -25,17 +25,23 @@ _SENTINEL = None  # poison pill to stop the playback thread
 
 class TARSVoice:
     """
-    TARS voice synthesizer — fully local via mlx-audio Qwen3-TTS Voice Design.
+    TARS voice synthesizer — speaks via the OMLX /v1/audio/speech endpoint.
 
-    Qwen3-TTS generates voices from text descriptions instead of fixed presets.
-    Each character gets a distinct voice based on their voice_desc string.
+    Qwen3-TTS Voice Design generates a voice from a text description rather than
+    a fixed preset, so each character's `voice_desc` becomes a distinct voice.
     Audio plays in a background thread so the prompt returns immediately.
     """
 
     def __init__(self, config: TARSConfig):
+        from openai import OpenAI
+
         self.config = config
-        self.model = None
-        self._model_loaded = False
+        # Same OMLX server as the LLM — reuse the OpenAI-compatible client.
+        self._client = OpenAI(
+            base_url=config.omlx.server_url,
+            api_key=config.omlx.api_key,
+            timeout=config.omlx.request_timeout,
+        )
         self.output_dir = Path(config.audio_output_dir)
         self.output_dir.mkdir(exist_ok=True)
         self._utterance_count = 0
@@ -47,31 +53,6 @@ class TARSVoice:
         )
         self._playback_thread.start()
 
-    def _ensure_model(self) -> None:
-        """Lazy-load the TTS model on first use (saves startup time)."""
-        if self._model_loaded:
-            return
-
-        import logging
-        import warnings
-        from mlx_audio.tts.utils import load_model
-
-        # Suppress noisy transformers/huggingface warnings during load
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            prev_levels = {}
-            for name in ("transformers", "huggingface_hub", "transformers.modeling_utils"):
-                logger = logging.getLogger(name)
-                prev_levels[name] = logger.level
-                logger.setLevel(logging.ERROR)
-            try:
-                self.model = load_model(self.config.mlx.tts_model)
-            finally:
-                for name, level in prev_levels.items():
-                    logging.getLogger(name).setLevel(level)
-
-        self._model_loaded = True
-
     def synthesize(
         self,
         text: str,
@@ -79,55 +60,53 @@ class TARSVoice:
         speed: Optional[float] = None,
     ) -> Optional[Path]:
         """
-        Convert text to voice audio via Qwen3-TTS Voice Design.
+        Convert text to a WAV via OMLX Qwen3-TTS Voice Design.
 
         Args:
             text: Text to synthesize.
             voice_desc: Voice description override (defaults to config value).
+                        Sent as the OpenAI `voice` field → the model's `instruct`.
             speed: TTS speed override (defaults to config value).
 
-        Returns path to the generated WAV file, or None on empty input.
+        Returns path to the generated audio file, or None on empty input/output.
         """
         if not text.strip():
             return None
 
-        self._ensure_model()
-
-        use_desc = voice_desc or self.config.mlx.tts_voice_desc
-        use_speed = speed or self.config.mlx.tts_speed
+        use_desc = voice_desc or self.config.tts.voice_desc
+        use_speed = speed or self.config.tts.speed
+        fmt = self.config.tts.response_format or "wav"
 
         self._utterance_count += 1
 
-        # Generate audio via Qwen3-TTS Voice Design
-        audio_chunks = []
-        for result in self.model.generate_voice_design(
-            text=text,
-            instruct=use_desc,
-        ):
-            chunk = np.array(result.audio, copy=False)
-            if chunk.ndim > 1:
-                chunk = chunk.flatten()
-            audio_chunks.append(chunk)
+        # OMLX is OpenAI-compatible: POST /v1/audio/speech. Qwen3-TTS VoiceDesign
+        # needs the voice *description* in the model's `instruct` kwarg. oMLX's TTS
+        # engine only routes that from the request's `instructions` field (the
+        # standard OpenAI TTS field) — its `voice` field is routed to the model's
+        # `voice` (speaker) param instead, which VoiceDesign ignores. So the
+        # description must go in `instructions`. We send it via extra_body for
+        # compatibility across openai-python versions, and still pass `voice`
+        # (required by the OpenAI schema; VoiceDesign tolerates it).
+        resp = self._client.audio.speech.create(
+            model=self.config.tts.model,
+            voice=use_desc,
+            input=text,
+            response_format=fmt,
+            speed=use_speed,
+            extra_body={"instructions": use_desc},
+        )
 
-        if not audio_chunks:
+        # Robust across openai-python versions: prefer .content, fall back to .read().
+        audio_bytes = getattr(resp, "content", None)
+        if audio_bytes is None and hasattr(resp, "read"):
+            audio_bytes = resp.read()
+        if not audio_bytes:
             return None
 
-        # Concatenate all chunks into a single waveform
-        audio = np.concatenate(audio_chunks) if len(audio_chunks) > 1 else audio_chunks[0]
-
-        # Normalize to [-1, 1] range if needed
-        peak = np.abs(audio).max()
-        if peak > 1.0:
-            audio = audio / peak
-
-        # Save as WAV
-        import soundfile as sf
-
         timestamp = int(time.time())
-        filename = f"tts_{timestamp}_{self._utterance_count:04d}.wav"
+        filename = f"tts_{timestamp}_{self._utterance_count:04d}.{fmt}"
         filepath = self.output_dir / filename
-
-        sf.write(str(filepath), audio, self.config.mlx.tts_sample_rate)
+        filepath.write_bytes(audio_bytes)
 
         return filepath
 
@@ -166,7 +145,7 @@ class TARSVoice:
         self._playback_queue.put((audio_path, delete_after))
 
     def _play_with_sounddevice(self, audio_path: Path) -> None:
-        """Play using sounddevice + soundfile (cross-platform)."""
+        """Play using sounddevice + soundfile (cross-platform). Reads the WAV header."""
         import soundfile as sf
         import sounddevice as sd
 
@@ -175,7 +154,7 @@ class TARSVoice:
         sd.wait()
 
     def _play_with_system(self, audio_path: Path) -> None:
-        """Fallback: use macOS afplay (primary target platform)."""
+        """Fallback: use a system audio player (afplay on macOS, mpv/ffplay on Linux)."""
         import platform
         import subprocess
 
@@ -204,7 +183,7 @@ class TARSVoice:
         speed: Optional[float] = None,
     ) -> Optional[Path]:
         """
-        Full pipeline: synthesize -> enqueue for background playback.
+        Full pipeline: synthesize via OMLX -> enqueue for background playback.
 
         Returns immediately after synthesis. Audio plays in a background thread.
         """
@@ -224,5 +203,5 @@ class TARSVoice:
     def cleanup(self) -> None:
         """Wait for playback to finish, then remove all generated audio files."""
         self._playback_queue.join()
-        for f in self.output_dir.glob("*.wav"):
+        for f in self.output_dir.glob("tts_*"):
             f.unlink(missing_ok=True)

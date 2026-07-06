@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-TARS-AI — Interstellar TARS Voice Agent (MLX Native)
+TARS-AI — Interstellar TARS Voice Agent (OMLX-backed)
 
-Fully local on Apple Silicon. No cloud. No API keys.
-LLM: mlx-lm (GPT-OSS 120B)  |  TTS: mlx-audio (Qwen3-TTS Voice Design)
+Both the LLM and the TTS are served by a local OMLX server (OpenAI-compatible
+MLX inference): chat via /v1/chat/completions, voice via /v1/audio/speech.
+No cloud. Your prompts and audio never leave the box.
+LLM: OMLX (MiniMax-M2 heretic)  |  TTS: OMLX (Qwen3-TTS Voice Design)
 
 Usage:
     python main.py
     python main.py --humor 75 --honesty 90 --no-voice
-    python main.py --llm mlx-community/gpt-oss-120b-4bit
+    python main.py --model MiniMax-M2.7-ultra-uncensored-heretic-oQ4-MLX
+    python main.py --omlx-url http://127.0.0.1:8000/v1 --api-key test
     python main.py --voice-desc "A deep authoritative male voice"
 """
 
@@ -23,7 +26,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 
-from config.settings import TARSConfig, TARSPersonality, MLXConfig
+from config.settings import TARSConfig, TARSPersonality, OMLXConfig, TTSConfig
 from core.agent import TARSAgent
 from tts.engine import TARSVoice
 
@@ -42,8 +45,13 @@ Examples:
   python main.py                                    # Default settings
   python main.py --humor 100                        # Maximum humor
   python main.py --honesty 95 --no-voice            # Text only, blunt mode
-  python main.py --llm mlx-community/gpt-oss-120b-4bit
+  python main.py --model MiniMax-M2.7-ultra-uncensored-heretic-oQ4-MLX
+  python main.py --omlx-url http://127.0.0.1:8000/v1 --api-key test
   python main.py --voice-desc "A warm British female voice"
+
+The LLM is served by your local OMLX server (OpenAI-compatible MLX). The model
+name must match exactly what OMLX serves — see GET {omlx-url}/models or the admin
+dashboard at {omlx-url without /v1}/admin/dashboard.
 
 TTS uses Qwen3-TTS Voice Design — voices are generated from text descriptions.
 Each character has a built-in voice description. Use --voice-desc to override TARS's default.
@@ -56,20 +64,38 @@ Each character has a built-in voice description. Use --voice-desc to override TA
     parser.add_argument("--discretion", type=int, default=85, help="Discretion level 0-100 (default: 85)")
     parser.add_argument("--trust", type=int, default=70, help="Trust level 0-100 (default: 70)")
 
-    # MLX LLM
+    # OMLX LLM server
     parser.add_argument(
-        "--llm", type=str,
-        default="mlx-community/gpt-oss-120b-4bit",
-        help="MLX LLM model from HuggingFace (default: gpt-oss-120b-4bit)"
+        "--model", "--llm", dest="model", type=str,
+        default=os.getenv("OMLX_MODEL") or os.getenv("STRIX_LLM")
+        or "MiniMax-M2.7-ultra-uncensored-heretic-oQ4-MLX",
+        help="Model id as served by OMLX (default: MiniMax-M2.7-ultra-uncensored-heretic-oQ4-MLX). "
+             "Also settable via OMLX_MODEL env var."
+    )
+    parser.add_argument(
+        "--omlx-url", type=str,
+        default=os.getenv("OMLX_URL") or os.getenv("LLM_API_BASE") or "http://127.0.0.1:8000/v1",
+        help="OMLX server URL (default: http://127.0.0.1:8000/v1). Also OMLX_URL / LLM_API_BASE env."
+    )
+    parser.add_argument(
+        "--api-key", type=str,
+        default=os.getenv("OMLX_API_KEY") or os.getenv("LLM_API_KEY") or "test",
+        help="OMLX API key, sent as a Bearer token (default: test). Also OMLX_API_KEY / LLM_API_KEY env."
     )
     parser.add_argument("--max-tokens", type=int, default=768, help="Max generation tokens (default: 768)")
     parser.add_argument("--temp", type=float, default=0.7, help="LLM temperature (default: 0.7)")
+    parser.add_argument(
+        "--timeout", type=float, default=1800.0,
+        help="Request timeout in seconds (default: 1800). OMLX loads models on demand, "
+             "so the first request after a cold start can be slow."
+    )
 
-    # MLX TTS
+    # TTS (served by OMLX, same server as the LLM)
     parser.add_argument(
         "--tts-model", type=str,
-        default="mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16",
-        help="MLX TTS model (default: Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16)"
+        default=os.getenv("OMLX_TTS_MODEL") or "Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16",
+        help="TTS model id as served by OMLX (default: Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16). "
+             "Also OMLX_TTS_MODEL env."
     )
     parser.add_argument(
         "--voice-desc", type=str,
@@ -77,19 +103,6 @@ Each character has a built-in voice description. Use --voice-desc to override TA
         help="Voice description for Qwen3-TTS Voice Design (TARS default voice)"
     )
     parser.add_argument("--speed", type=float, default=1.0, help="TTS speed (default: 1.0)")
-
-    # Inference backend
-    parser.add_argument(
-        "--server", action="store_true",
-        default=bool(os.getenv("USE_MLX_SERVER")),
-        help="Use local MLX server (http://localhost:8080/v1) instead of direct mlx-lm. "
-             "Also enabled by setting USE_MLX_SERVER=1 env var."
-    )
-    parser.add_argument(
-        "--server-url", type=str,
-        default=os.getenv("MLX_SERVER_URL", "http://localhost:8080/v1"),
-        help="MLX server URL (default: http://localhost:8080/v1)"
-    )
 
     # Output
     parser.add_argument("--no-voice", action="store_true", help="Text-only mode, no audio")
@@ -128,10 +141,9 @@ def print_boot_sequence(config: TARSConfig):
         (f"  Honesty: {config.personality.honesty}%", 0.1),
         (f"  Discretion: {config.personality.discretion}%", 0.1),
         (f"  Trust: {config.personality.trust}%", 0.1),
-        (f"LLM: {config.mlx.llm_model.split('/')[-1]}"
-         + (f" (via server @ {config.mlx.server_url})" if config.use_server else ""), 0.2),
-        (f"TTS: {config.mlx.tts_model.split('/')[-1]} (Voice Design) @ {config.mlx.tts_speed}x", 0.2),
-        (f"Runtime: MLX {'server' if config.use_server else 'on Apple Silicon'}", 0.2),
+        (f"LLM: {config.omlx.model} via OMLX @ {config.omlx.server_url}", 0.2),
+        (f"TTS: {config.tts.model} (Voice Design) via OMLX @ {config.tts.speed}x", 0.2),
+        ("Runtime: OMLX server (LLM + TTS)", 0.2),
         ("Articulation servos: online", 0.2),
         ("Crew manifest: Brand, Dr. Mann, Prof. Brand, Murphy — standing by", 0.2),
         ("All systems nominal", 0.3),
@@ -175,20 +187,25 @@ def main():
         trust=args.trust,
     )
 
-    mlx_config = MLXConfig(
-        llm_model=args.llm,
-        llm_max_tokens=args.max_tokens,
-        llm_temperature=args.temp,
-        server_url=args.server_url,
-        tts_model=args.tts_model,
-        tts_voice_desc=args.voice_desc,
-        tts_speed=args.speed,
+    omlx_config = OMLXConfig(
+        model=args.model,
+        server_url=args.omlx_url,
+        api_key=args.api_key,
+        max_tokens=args.max_tokens,
+        temperature=args.temp,
+        request_timeout=args.timeout,
+    )
+
+    tts_config = TTSConfig(
+        model=args.tts_model,
+        voice_desc=args.voice_desc,
+        speed=args.speed,
     )
 
     config = TARSConfig(
         personality=personality,
-        mlx=mlx_config,
-        use_server=args.server,
+        omlx=omlx_config,
+        tts=tts_config,
         play_audio=not args.no_voice,
         save_audio=not args.no_save,
     )
@@ -203,26 +220,22 @@ def main():
     # Boot
     print_boot_sequence(config)
 
-    # Initialize LLM
-    if config.use_server:
-        console.print(f"  [yellow]Connecting to MLX server at {config.mlx.server_url}...[/yellow]")
-    else:
-        console.print("  [yellow]Loading LLM into memory...[/yellow]")
+    # Initialize LLM (OMLX client — the connection is lazy; the model loads on
+    # the first chat, so that request can be slow after a cold start).
+    console.print(f"  [yellow]Connecting to OMLX server at {config.omlx.server_url}...[/yellow]")
     try:
         agent = TARSAgent(config)
-        if config.use_server:
-            console.print("  [green]>[/green] Server connected\n")
-        else:
-            console.print("  [green]>[/green] LLM loaded\n")
+        console.print("  [green]>[/green] OMLX client ready")
+        console.print(
+            f"  [dim]Model '{config.omlx.model}' loads on demand — first reply may be slow.[/dim]\n"
+        )
     except Exception as e:
         console.print(f"[red]LLM init failed:[/red] {e}")
-        if config.use_server:
-            console.print(f"[dim]Ensure your MLX server is running at {config.mlx.server_url}[/dim]")
-        else:
-            console.print("[dim]Ensure mlx-lm is installed: pip install mlx-lm[/dim]")
+        console.print(f"[dim]Ensure OMLX is running and serving '{config.omlx.model}'.[/dim]")
+        console.print(f"[dim]Dashboard: {config.omlx.dashboard_url}[/dim]")
         sys.exit(1)
 
-    # Initialize TTS (lazy-loaded on first speak)
+    # Initialize TTS (OMLX audio client — synthesis happens on the OMLX server)
     voice: TARSVoice | None = None
     if not args.no_voice:
         try:

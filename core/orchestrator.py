@@ -226,8 +226,8 @@ class ConversationOrchestrator:
         full_text = ""
 
         # Save and temporarily override max_tokens
-        original_max_tokens = self.config.mlx.llm_max_tokens
-        self.config.mlx.llm_max_tokens = max_tokens
+        original_max_tokens = self.config.omlx.max_tokens
+        self.config.omlx.max_tokens = max_tokens
 
         # Capture character in a local variable for the closure
         _char = character
@@ -252,7 +252,7 @@ class ConversationOrchestrator:
 
             self.llm.generate(char_messages, on_token=_on_token)
         finally:
-            self.config.mlx.llm_max_tokens = original_max_tokens
+            self.config.omlx.max_tokens = original_max_tokens
 
         full_text = full_text.strip()
         silent = self._is_silent(full_text)

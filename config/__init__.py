@@ -1,3 +1,3 @@
-from config.settings import TARSConfig, TARSPersonality, MLXConfig
+from config.settings import TARSConfig, TARSPersonality, OMLXConfig, TTSConfig
 
-__all__ = ["TARSConfig", "TARSPersonality", "MLXConfig"]
+__all__ = ["TARSConfig", "TARSPersonality", "OMLXConfig", "TTSConfig"]

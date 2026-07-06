@@ -1,11 +1,12 @@
 """
-TARS LangGraph Agent — MLX Native
+TARS LangGraph Agent — OMLX-backed
 
-A stateful conversational agent using LangGraph with mlx-lm as the
-local LLM backend. No cloud APIs — all inference on Apple Silicon.
+A stateful conversational agent using LangGraph with a local OMLX server as
+the LLM backend. OMLX is an OpenAI-compatible MLX inference server, so all
+inference stays on your own hardware — no cloud APIs.
 
 Graph: [input] -> generate_response -> [output]
-LLM:   mlx-lm (Llama 3.1 8B Instruct 4-bit by default)
+LLM:   OMLX server (MiniMax-M2 heretic by default), reached via the OpenAI SDK
 """
 
 from __future__ import annotations
@@ -49,84 +50,16 @@ def _format_messages(messages: list[BaseMessage]) -> list[dict]:
     return formatted
 
 
-class MLXLLM:
+class OMLXLLM:
     """
-    Thin wrapper around mlx-lm for LangGraph integration.
+    OpenAI-compatible client for a local OMLX MLX inference server.
 
-    Loads the model once, formats messages via the tokenizer's
-    chat template, and generates responses locally on Apple Silicon.
-    Uses stream_generate for token-by-token output.
-    """
-
-    def __init__(self, config: TARSConfig):
-        from mlx_lm import load
-
-        self.config = config
-        self.model, self.tokenizer = load(config.mlx.llm_model)
-        self._last_generation_tps: float = 0.0
-
-    def generate(
-        self,
-        messages: list[BaseMessage],
-        on_token: Callable[[str], None] | None = None,
-    ) -> str:
-        """
-        Generate a response from a list of LangChain messages.
-
-        Uses stream_generate for token-by-token output. If on_token
-        is provided, each text chunk is passed to it as it arrives.
-        """
-        from mlx_lm import stream_generate
-        from mlx_lm.sample_utils import make_sampler, make_logits_processors
-
-        formatted = _format_messages(messages)
-
-        # Apply the model's native chat template
-        prompt = self.tokenizer.apply_chat_template(
-            formatted, tokenize=False, add_generation_prompt=True
-        )
-
-        # Build sampler and logits processors for mlx-lm ≥0.30
-        sampler = make_sampler(
-            temp=self.config.mlx.llm_temperature,
-            top_p=self.config.mlx.llm_top_p,
-        )
-        logits_processors = make_logits_processors(
-            repetition_penalty=self.config.mlx.llm_repetition_penalty,
-        )
-
-        # Stream generate locally
-        full_text = ""
-        for response in stream_generate(
-            self.model,
-            self.tokenizer,
-            prompt=prompt,
-            max_tokens=self.config.mlx.llm_max_tokens,
-            sampler=sampler,
-            logits_processors=logits_processors,
-        ):
-            chunk = response.text
-            full_text += chunk
-            if on_token is not None:
-                on_token(chunk)
-            # Capture tokens/sec from the last response
-            if hasattr(response, "generation_tps"):
-                self._last_generation_tps = response.generation_tps
-
-        return full_text.strip()
-
-    @property
-    def last_generation_tps(self) -> float:
-        return self._last_generation_tps
-
-
-class ServerLLM:
-    """
-    OpenAI-compatible client for a local MLX inference server.
-
-    Connects to the MLX server (default http://localhost:8080/v1) using the
-    OpenAI Python SDK. Drop-in replacement for MLXLLM — same generate()
-    interface, streaming support, and config integration.
+    OMLX (http://127.0.0.1:8000/v1 by default) serves models over the OpenAI
+    API with an admin dashboard at /admin/dashboard. We reach it with the
+    OpenAI Python SDK, sending the model id exactly as OMLX serves it plus an
+    `Authorization: Bearer <api_key>` header. Models load on demand, so the
+    first request after a cold start can take a while — hence the generous
+    request timeout configured on the client.
     """
 
     def __init__(self, config: TARSConfig):
@@ -134,8 +67,9 @@ class ServerLLM:
 
         self.config = config
         self.client = OpenAI(
-            base_url=config.mlx.server_url,
-            api_key="local",
+            base_url=config.omlx.server_url,
+            api_key=config.omlx.api_key,
+            timeout=config.omlx.request_timeout,
         )
         self._last_generation_tps: float = 0.0
 
@@ -145,38 +79,45 @@ class ServerLLM:
         on_token: Callable[[str], None] | None = None,
     ) -> str:
         """
-        Generate a response via the local MLX server.
+        Generate a response via the local OMLX server.
 
         Uses streaming chat completions when on_token is provided,
-        non-streaming otherwise.
+        non-streaming otherwise. The model id comes straight from config —
+        it must match what OMLX serves, or the server returns a 404.
         """
+        import time
+
         formatted = _format_messages(messages)
+        params = dict(
+            model=self.config.omlx.model,
+            messages=formatted,
+            temperature=self.config.omlx.temperature,
+            top_p=self.config.omlx.top_p,
+            max_tokens=self.config.omlx.max_tokens,
+        )
 
         if on_token is not None:
-            stream = self.client.chat.completions.create(
-                model="local",
-                messages=formatted,
-                temperature=self.config.mlx.llm_temperature,
-                top_p=self.config.mlx.llm_top_p,
-                max_tokens=self.config.mlx.llm_max_tokens,
-                stream=True,
-            )
+            stream = self.client.chat.completions.create(**params, stream=True)
             full_text = ""
+            n_chunks = 0
+            t0 = time.perf_counter()
             for chunk in stream:
+                # Some OpenAI-compatible servers emit a trailing usage-only
+                # chunk with an empty `choices` list — skip those.
+                if not chunk.choices:
+                    continue
                 delta = chunk.choices[0].delta.content
                 if delta:
                     full_text += delta
+                    n_chunks += 1
                     on_token(delta)
+            elapsed = time.perf_counter() - t0
+            # Rough client-side tokens/sec (chunk ≈ token for most servers).
+            self._last_generation_tps = (n_chunks / elapsed) if elapsed > 0 else 0.0
             return full_text.strip()
-        else:
-            resp = self.client.chat.completions.create(
-                model="local",
-                messages=formatted,
-                temperature=self.config.mlx.llm_temperature,
-                top_p=self.config.mlx.llm_top_p,
-                max_tokens=self.config.mlx.llm_max_tokens,
-            )
-            return resp.choices[0].message.content.strip()
+
+        resp = self.client.chat.completions.create(**params)
+        return resp.choices[0].message.content.strip()
 
     @property
     def last_generation_tps(self) -> float:
@@ -187,7 +128,7 @@ class ServerLLM:
 
 class TARSAgent:
     """
-    The TARS conversational agent built on LangGraph + mlx-lm.
+    The TARS conversational agent built on LangGraph + a local OMLX server.
 
     Graph structure:
         [input] -> generate_response -> [output]
@@ -201,7 +142,7 @@ class TARSAgent:
 
     def __init__(self, config: TARSConfig):
         self.config = config
-        self.llm = ServerLLM(config) if config.use_server else MLXLLM(config)
+        self.llm = OMLXLLM(config)
         self.system_prompt = build_tars_system_prompt(config.personality)
         self.graph = self._build_graph()
         self.app = self.graph.compile()

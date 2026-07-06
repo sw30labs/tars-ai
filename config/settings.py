@@ -1,8 +1,13 @@
 """
-TARS-AI Configuration — MLX Native on Apple Silicon
+TARS-AI Configuration — fully OMLX-backed (LLM + TTS)
 
-All inference runs locally via MLX. No cloud APIs, no API keys.
-LLM: mlx-lm (GPT-OSS 120B)    |    TTS: mlx-audio (Qwen3-TTS Voice Design)
+Both models run on a local OMLX server: an OpenAI-compatible MLX inference
+server (default http://127.0.0.1:8000/v1) with an admin dashboard at
+/admin/dashboard. The LLM uses /v1/chat/completions; TTS (Qwen3-TTS Voice
+Design) uses /v1/audio/speech. No cloud APIs, and nothing runs locally on the
+client except audio playback.
+
+LLM: OMLX (MiniMax-M2 heretic by default)  |  TTS: OMLX (Qwen3-TTS Voice Design)
 """
 
 from __future__ import annotations
@@ -60,27 +65,63 @@ class TARSPersonality:
         return "\n".join(blocks)
 
 
-# ── MLX Configuration ───────────────────────────────────────────────────
+# ── OMLX LLM Configuration ───────────────────────────────────────────────
 
 @dataclass
-class MLXConfig:
-    """All-local MLX inference settings for Apple Silicon."""
+class OMLXConfig:
+    """
+    Connection + sampling settings for a local OMLX server.
 
-    # ── LLM (GPT-OSS 120B MoE — 117B total, 5.1B active per token) ──
-    llm_model: str = "mlx-community/gpt-oss-120b-4bit"
-    llm_max_tokens: int = 768
-    llm_temperature: float = 0.7
-    llm_repetition_penalty: float = 1.1
-    llm_top_p: float = 0.9
+    OMLX is an OpenAI-compatible MLX inference server. TARS reaches it with
+    the OpenAI SDK, so `model` must match *exactly* what OMLX serves — check
+    `GET {server_url}/models` or the admin dashboard. OMLX loads models on
+    demand, so the first request after a cold start can be slow; `request_timeout`
+    is deliberately generous to cover that initial load.
+    """
 
-    # ── MLX Server (OpenAI-compatible local inference) ──
-    server_url: str = "http://localhost:8080/v1"
+    # Model id — must match a model OMLX is actually serving (not a HuggingFace path).
+    model: str = "MiniMax-M2.7-ultra-uncensored-heretic-oQ4-MLX"
 
-    # ── TTS (Qwen3-TTS Voice Design via mlx-audio) ──
-    tts_model: str = "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16"
-    tts_voice_desc: str = "A deep, measured, authoritative American male voice. Military precision. Deliberate pauses."
-    tts_speed: float = 1.0
-    tts_sample_rate: int = 24000
+    # OMLX OpenAI-compatible endpoint. Admin dashboard lives at .../admin/dashboard.
+    server_url: str = "http://127.0.0.1:8000/v1"
+
+    # OMLX local dev key — sent as `Authorization: Bearer <api_key>`.
+    api_key: str = "test"
+
+    # Sampling
+    max_tokens: int = 768
+    temperature: float = 0.7
+    top_p: float = 0.9
+
+    # OMLX loads models on demand — first request can take minutes. Seconds.
+    request_timeout: float = 1800.0
+
+    @property
+    def dashboard_url(self) -> str:
+        """Best-effort admin dashboard URL derived from the /v1 endpoint."""
+        base = self.server_url.rstrip("/")
+        if base.endswith("/v1"):
+            base = base[: -len("/v1")]
+        return f"{base.rstrip('/')}/admin/dashboard"
+
+
+# ── TTS Configuration (served by OMLX) ───────────────────────────────────
+
+@dataclass
+class TTSConfig:
+    """
+    Text-to-speech via the OMLX server's OpenAI-compatible /v1/audio/speech.
+
+    OMLX serves the TTS model (Qwen3-TTS Voice Design) alongside the LLM, so
+    `model` must match what OMLX serves (GET /v1/models). The `voice_desc` is
+    sent as the OpenAI `voice` field; oMLX maps it to the model's `instruct`
+    for VoiceDesign models. OMLX returns audio in `response_format` (WAV).
+    """
+
+    model: str = "Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16"
+    voice_desc: str = "A deep, measured, authoritative American male voice. Military precision. Deliberate pauses."
+    speed: float = 1.0
+    response_format: str = "wav"
 
 
 # ── Master Config ────────────────────────────────────────────────────────
@@ -88,8 +129,8 @@ class MLXConfig:
 @dataclass
 class TARSConfig:
     personality: TARSPersonality = field(default_factory=TARSPersonality)
-    mlx: MLXConfig = field(default_factory=MLXConfig)
-    use_server: bool = False          # Use MLX server instead of direct mlx-lm
+    omlx: OMLXConfig = field(default_factory=OMLXConfig)
+    tts: TTSConfig = field(default_factory=TTSConfig)
     audio_output_dir: str = "audio_output"
     play_audio: bool = True           # Auto-play generated audio
     save_audio: bool = True           # Keep audio files
@@ -97,11 +138,11 @@ class TARSConfig:
     multi_character_max_tokens: int = 256  # Shorter responses for guest characters
 
     def validate(self):
-        """Sanity-check config before launch."""
-        # Check that we're on macOS / Apple Silicon (MLX requirement)
-        import platform
-        if platform.system() != "Darwin":
-            raise EnvironmentError(
-                "TARS-AI MLX mode requires macOS on Apple Silicon (M1/M2/M3/M4). "
-                f"Detected: {platform.system()} {platform.machine()}"
-            )
+        """Sanity-check config before launch.
+
+        Both the LLM and TTS run on the remote OMLX server, and audio playback
+        is cross-platform (sounddevice, with afplay / mpv / ffplay fallbacks),
+        so there's no Apple-Silicon requirement on the client. Personality
+        ranges are validated in TARSPersonality.__post_init__.
+        """
+        return None
