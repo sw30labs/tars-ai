@@ -65,15 +65,8 @@ def register_settings_commands(registry: CommandRegistry, context: dict) -> None
     """Register the settings query and adjustment commands."""
 
     def handle_settings_query(text: str, config: TARSConfig, ctx: dict) -> str | None:
-        p = config.personality
-        return (
-            f"Current operating parameters. "
-            f"Humor at {p.humor} percent. "
-            f"Honesty at {p.honesty} percent. "
-            f"Discretion at {p.discretion} percent. "
-            f"Trust at {p.trust} percent. "
-            f"All systems nominal."
-        )
+        from ui import parameter_display
+        return parameter_display(config.personality)
 
     registry.register(Command(
         name="settings_query",
@@ -161,8 +154,8 @@ def register_persistence_commands(registry: CommandRegistry, context: dict) -> N
 
     def handle_save(text: str, config: TARSConfig, ctx: dict) -> str | None:
         text_lower = text.lower().strip()
-        # Extract optional name after "save"
-        match = re.match(r'save\s*(.*)', text_lower)
+        # Extract optional name after "save" / "save as"
+        match = re.match(r'save\s+(?:as\s+)?(.*)', text_lower)
         name = match.group(1).strip() if match else ""
         save_fn = ctx.get("save_conversation")
         if save_fn:

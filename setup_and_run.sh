@@ -27,7 +27,7 @@ NO_VOICE="${TARS_NO_VOICE:-false}"
 # but we pass them explicitly so the launch banner shows exactly what's used.
 OMLX_URL="${OMLX_URL:-${LLM_API_BASE:-http://127.0.0.1:8000/v1}}"
 OMLX_API_KEY="${OMLX_API_KEY:-${LLM_API_KEY:-test}}"
-OMLX_MODEL="${OMLX_MODEL:-${STRIX_LLM:-MiniMax-M2.7-ultra-uncensored-heretic-oQ4-MLX}}"
+OMLX_MODEL="${OMLX_MODEL:-${STRIX_LLM:-Qwen3.6-27B-bf16}}"
 OMLX_TTS_MODEL="${OMLX_TTS_MODEL:-Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16}"
 
 ARGS=()

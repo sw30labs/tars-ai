@@ -5,9 +5,8 @@
 # ── OMLX server client (OpenAI-compatible: chat + /v1/audio/speech) ──
 openai>=1.0.0                    # Client for the local OMLX server (Bearer-auth /v1)
 
-# ── Agent Framework ──
+# ── Message types ──
 langchain-core>=0.3.0            # Message types & base abstractions
-langgraph>=0.2.0                 # Graph-based stateful agents
 
 # ── Audio playback (local, cross-platform) ──
 sounddevice>=0.4.6               # Audio playback
@@ -17,3 +16,6 @@ numpy>=1.24.0                    # Array backing for sounddevice/soundfile
 # ── UI & Config ──
 rich>=13.0.0                     # Console UI / pretty printing
 pyyaml>=6.0                      # Prompt template loading
+
+# ── Testing ──
+pytest>=7.0                      # Unit tests (tests/)

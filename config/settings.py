@@ -13,13 +13,14 @@ LLM: OMLX (MiniMax-M2 heretic by default)  |  TTS: OMLX (Qwen3-TTS Voice Design)
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
-from typing import Optional
 
 import yaml
 
 PROMPTS_PATH = Path(__file__).resolve().parent.parent / "prompts.yaml"
 
+@lru_cache(maxsize=1)
 def _load_prompts() -> dict:
     with open(PROMPTS_PATH) as f:
         return yaml.safe_load(f)
@@ -93,6 +94,12 @@ class OMLXConfig:
     temperature: float = 0.7
     top_p: float = 0.9
 
+    # Qwen3/3.5/3.6 hybrid-thinking models default to "think out loud" on OMLX.
+    # That dumps multi-paragraph reasoning into the reply (and TTS). Off by
+    # default for a conversational agent; pass True to re-enable chain-of-thought.
+    # Sent as extra_body chat_template_kwargs.enable_thinking (OMLX/OpenAI-compat).
+    enable_thinking: bool = False
+
     # OMLX loads models on demand — first request can take minutes. Seconds.
     request_timeout: float = 1800.0
 
@@ -119,7 +126,10 @@ class TTSConfig:
     """
 
     model: str = "Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16"
-    voice_desc: str = "A deep, measured, authoritative American male voice. Military precision. Deliberate pauses."
+    # Fallback voice description, used only when the caller doesn't pass one
+    # explicitly. The canonical TARS default lives in core/characters.py
+    # (TARS_VOICE_DESC); the CLI --voice-desc flag overrides it at startup.
+    voice_desc: str | None = None
     speed: float = 1.0
     response_format: str = "wav"
 
@@ -138,11 +148,30 @@ class TARSConfig:
     multi_character_max_tokens: int = 256  # Shorter responses for guest characters
 
     def validate(self):
-        """Sanity-check config before launch.
+        """Sanity-check config before launch. Raises ValueError on bad values.
 
         Both the LLM and TTS run on the remote OMLX server, and audio playback
         is cross-platform (sounddevice, with afplay / mpv / ffplay fallbacks),
         so there's no Apple-Silicon requirement on the client. Personality
         ranges are validated in TARSPersonality.__post_init__.
         """
-        return None
+        if not self.omlx.server_url.startswith(("http://", "https://")):
+            raise ValueError(
+                f"OMLX server URL must start with http:// or https://, "
+                f"got {self.omlx.server_url!r}"
+            )
+        if self.omlx.max_tokens <= 0:
+            raise ValueError(f"max_tokens must be positive, got {self.omlx.max_tokens}")
+        if self.omlx.request_timeout <= 0:
+            raise ValueError(f"timeout must be positive, got {self.omlx.request_timeout}")
+        if self.tts.speed <= 0:
+            raise ValueError(f"TTS speed must be positive, got {self.tts.speed}")
+        if self.conversation_memory_k <= 0:
+            raise ValueError(
+                f"conversation_memory_k must be positive, got {self.conversation_memory_k}"
+            )
+        if self.multi_character_max_tokens <= 0:
+            raise ValueError(
+                f"multi_character_max_tokens must be positive, "
+                f"got {self.multi_character_max_tokens}"
+            )

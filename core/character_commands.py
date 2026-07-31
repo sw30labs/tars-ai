@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import re
 
+from rich.markup import escape
+
 from config.settings import TARSConfig
 from core.commands import CommandRegistry, Command
 from core.characters import resolve_character, CHARACTER_REGISTRY
@@ -23,8 +25,9 @@ from core.characters import resolve_character, CHARACTER_REGISTRY
 # Optional "tars" / "hey tars," prefix before the actual command verb
 _TARS_PREFIX = r'(?:(?:hey\s+)?tars[,:\s]\s*)?'
 
-# Call verbs and dismiss verbs
-_CALL_VERBS = r'(?:call|summon|bring in|get|wake up|invite)'
+# Call verbs and dismiss verbs. Deliberately excludes generic verbs like
+# "get" — "get me a status report" is not a summon request.
+_CALL_VERBS = r'(?:call|summon|bring in|wake up|invite)'
 _DISMISS_VERBS = r'(?:dismiss|send away|remove|goodbye)'
 
 # Everybody synonyms
@@ -93,7 +96,7 @@ def register_character_commands(registry: CommandRegistry, context: dict) -> Non
                     if not c.is_primary
                 )
                 results.append(
-                    f"I don't recognize '{name}'. Available: {available}."
+                    f"I don't recognize '{escape(name)}'. Available: {available}."
                 )
 
         return " ".join(results)
@@ -129,7 +132,7 @@ def register_character_commands(registry: CommandRegistry, context: dict) -> Non
             if char:
                 results.append(orchestrator.dismiss_character(char.id))
             else:
-                results.append(f"I don't recognize '{name}'.")
+                results.append(f"I don't recognize '{escape(name)}'.")
 
         return " ".join(results)
 

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-TARS-AI is a conversational AI agent embodying TARS from Interstellar. Both the LLM and the TTS run on a local **OMLX** server — an OpenAI-compatible MLX inference server — reached via the OpenAI SDK. The LLM uses `/v1/chat/completions`; text-to-speech (Qwen3-TTS Voice Design) uses `/v1/audio/speech`. LangGraph manages stateful conversation. Nothing goes to a cloud API, and nothing is downloaded to the client: both models live on your OMLX box. The client only does audio playback.
+TARS-AI is a conversational AI agent embodying TARS from Interstellar. Both the LLM and the TTS run on a local **OMLX** server — an OpenAI-compatible MLX inference server — reached via the OpenAI SDK. The LLM uses `/v1/chat/completions`; text-to-speech (Qwen3-TTS Voice Design) uses `/v1/audio/speech`. Nothing goes to a cloud API, and nothing is downloaded to the client: both models live on your OMLX box. The client only does audio playback.
 
 ## Commands
 
@@ -32,24 +32,30 @@ python main.py --voice-desc "A warm British female voice" --speed 0.88
 
 # Or use env vars (compatible with the strix-omlx naming)
 OMLX_URL=http://127.0.0.1:8000/v1 OMLX_API_KEY=test OMLX_MODEL=MiniMax-M2.7-ultra-uncensored-heretic-oQ4-MLX python main.py
+# Run the test suite
+pytest
 ```
 
-There are no test or lint commands configured.
+There is no lint command configured.
 
 ## Architecture
 
 ```
-main.py                  CLI entry point, boot sequence, conversation loop
+main.py                  CLI entry point, conversation loop, character turn callbacks
+ui.py                    Interstellar-faithful TUI: boot reactivation scroll, parameter bars,
+                         monolith figure, HUD tags, PROCESSING indicator, alerts
 config/settings.py       Dataclasses: TARSPersonality, OMLXConfig, TTSConfig, TARSConfig
-core/agent.py            TARSAgent (LangGraph graph) + OMLXLLM (OpenAI SDK -> OMLX server)
+core/agent.py            TARSAgent facade (LLM + orchestrator + command registry) + OMLXLLM (OpenAI SDK -> OMLX server)
 core/orchestrator.py     ConversationOrchestrator - multi-character (crew) turn-taking
 core/prompt.py           build_tars_system_prompt() - dynamic system prompt from personality knobs
+core/characters.py       Crew character registry (prompts, voices) + TARS_VOICE_DESC canonical default
 tts/engine.py            TARSVoice - OMLX /v1/audio/speech synthesis, playback, audio files
+tests/                   pytest suite (commands, orchestrator, persistence, settings)
 ```
 
 ### Data Flow
 
-User input → `TARSAgent.chat()` / `ConversationOrchestrator.generate_round()` → settings command interception (fast path) or LangGraph invoke → `OMLXLLM.generate()` (streaming chat completions against the OMLX `/v1` endpoint via the OpenAI SDK) → response text to console → `TARSVoice.speak()` (if enabled) → `POST /v1/audio/speech` on OMLX → WAV bytes → play via sounddevice/afplay
+User input → command registry dispatch (settings/save/crew fast path) or `ConversationOrchestrator.generate_round()` → per character: `OMLXLLM.generate()` (streaming chat completions against the OMLX `/v1` endpoint via the OpenAI SDK) → response text to console → `TARSVoice.speak()` (if enabled; background synthesis thread) → `POST /v1/audio/speech` on OMLX → WAV bytes → play via sounddevice/afplay (background playback thread)
 
 ### OMLX backend (LLM + TTS)
 
@@ -63,7 +69,7 @@ User input → `TARSAgent.chat()` / `ConversationOrchestrator.generate_round()` 
 
 - **Personality-as-prompt**: Four knobs (humor, honesty, discretion, trust, each 0-100) are converted to prompt directives via `TARSPersonality.to_prompt_block()` and injected into the system prompt. Adjustable at runtime via natural language commands in `core/commands.py`.
 - **TTS is remote**: synthesis happens on OMLX. `TARSVoice` sends text + voice description to `/v1/audio/speech` and plays back the returned WAV. No local model, no download.
-- **Conversation memory**: message history is kept in state and trimmed to the last K messages (default 20) with rolling summarization of what's dropped. The system prompt is always preserved.
+- **Conversation memory**: message history lives in the `ConversationOrchestrator` and is trimmed to the last K messages (default 20) with rolling summarization of what's dropped. The system prompt is always preserved.
 - **Multi-character crew**: `ConversationOrchestrator` runs turn-taking across Interstellar crew characters, each a different system prompt + voice description (its own `/v1/audio/speech` voice), all served by the same OMLX models. Guest characters can stay `[SILENT]`.
 - **Settings fast path**: commands like "set humor to 50" or "what are your settings?" are intercepted before inference.
 

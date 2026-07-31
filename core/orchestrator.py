@@ -10,8 +10,8 @@ a different system prompt + voice preset.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
-from typing import Callable, Optional
+from dataclasses import dataclass
+from typing import Callable
 
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 
@@ -20,7 +20,6 @@ from core.characters import (
     Character,
     CHARACTER_REGISTRY,
     TARS_MULTI_PARTY_ADDENDUM,
-    resolve_character,
 )
 
 
@@ -156,39 +155,49 @@ class ConversationOrchestrator:
         """
         callbacks = (on_character_start, on_character_token, on_character_end)
 
-        # Add Cooper's message to shared history
+        # Add Cooper's message to shared history. If generation fails partway,
+        # history is rolled back so the next turn doesn't see an orphaned
+        # unanswered message.
         self.messages.append(HumanMessage(content=user_input, name="Cooper"))
+        history_len = len(self.messages)
 
-        # ── Main round ───────────────────────────────────────────────
-        # Responses stay in round_responses only; committed to self.messages after.
-        round_responses: list[CharacterResponse] = []
+        try:
+            # ── Main round ───────────────────────────────────────────────
+            # Responses stay in round_responses only; committed to self.messages after.
+            round_responses: list[CharacterResponse] = []
 
-        for character in self.active_characters:
-            resp = self._generate_character_response(
-                character, round_responses, *callbacks
-            )
-            round_responses.append(resp)
-
-        # Commit main-round responses to persistent history
-        self._commit_responses(round_responses)
-
-        # ── Follow-up round ──────────────────────────────────────────
-        # If a character was addressed by name + "?" in someone else's
-        # response, give them one extra turn so they can actually answer.
-        followup_ids = self._find_addressed_characters(round_responses)
-        if followup_ids:
-            followup_responses: list[CharacterResponse] = []
-            for cid in followup_ids:
-                character = CHARACTER_REGISTRY[cid]
-                # self.messages now has the main round; followup_responses
-                # tracks only the follow-up pass (no duplication).
+            for character in self.active_characters:
                 resp = self._generate_character_response(
-                    character, followup_responses, *callbacks
+                    character, round_responses, *callbacks
                 )
-                followup_responses.append(resp)
+                round_responses.append(resp)
 
-            self._commit_responses(followup_responses)
-            round_responses.extend(followup_responses)
+            # Commit main-round responses to persistent history
+            self._commit_responses(round_responses)
+
+            # ── Follow-up round ──────────────────────────────────────────
+            # If a character was addressed by name + "?" in someone else's
+            # response, give them one extra turn so they can actually answer.
+            followup_ids = self._find_addressed_characters(round_responses)
+            if followup_ids:
+                followup_responses: list[CharacterResponse] = []
+                for cid in followup_ids:
+                    character = CHARACTER_REGISTRY[cid]
+                    # self.messages now has the main round; followup_responses
+                    # tracks only the follow-up pass (no duplication).
+                    resp = self._generate_character_response(
+                        character, followup_responses, *callbacks
+                    )
+                    followup_responses.append(resp)
+
+                self._commit_responses(followup_responses)
+                round_responses.extend(followup_responses)
+        except Exception:
+            del self.messages[history_len:]
+            # Remove the unanswered user message as well
+            if self.messages and isinstance(self.messages[-1], HumanMessage):
+                self.messages.pop()
+            raise
 
         # Trim history if needed
         self._trim_history()
@@ -225,34 +234,24 @@ class ConversationOrchestrator:
         started = False
         full_text = ""
 
-        # Save and temporarily override max_tokens
-        original_max_tokens = self.config.omlx.max_tokens
-        self.config.omlx.max_tokens = max_tokens
+        def _on_token(token: str):
+            nonlocal buffer, started, full_text
+            full_text += token
 
-        # Capture character in a local variable for the closure
-        _char = character
+            if not started:
+                buffer += token
+                if len(buffer) >= SILENCE_BUFFER_SIZE:
+                    if not self._is_silent(buffer):
+                        started = True
+                        if on_character_start:
+                            on_character_start(character)
+                        if on_character_token:
+                            on_character_token(character.id, buffer)
+            else:
+                if on_character_token:
+                    on_character_token(character.id, token)
 
-        try:
-            def _on_token(token: str):
-                nonlocal buffer, started, full_text
-                full_text += token
-
-                if not started:
-                    buffer += token
-                    if len(buffer) >= SILENCE_BUFFER_SIZE:
-                        if not self._is_silent(buffer):
-                            started = True
-                            if on_character_start:
-                                on_character_start(_char)
-                            if on_character_token:
-                                on_character_token(_char.id, buffer)
-                else:
-                    if on_character_token:
-                        on_character_token(_char.id, token)
-
-            self.llm.generate(char_messages, on_token=_on_token)
-        finally:
-            self.config.omlx.max_tokens = original_max_tokens
+        self.llm.generate(char_messages, on_token=_on_token, max_tokens=max_tokens)
 
         full_text = full_text.strip()
         silent = self._is_silent(full_text)
@@ -260,12 +259,12 @@ class ConversationOrchestrator:
         # If we buffered but never started and it's not silent, flush now
         if not started and not silent and buffer:
             if on_character_start:
-                on_character_start(_char)
+                on_character_start(character)
             if on_character_token:
-                on_character_token(_char.id, buffer)
+                on_character_token(character.id, buffer)
 
         if not silent and on_character_end:
-            on_character_end(_char, full_text)
+            on_character_end(character, full_text)
 
         return CharacterResponse(character=character, text=full_text, silent=silent)
 

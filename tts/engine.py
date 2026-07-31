@@ -29,7 +29,10 @@ class TARSVoice:
 
     Qwen3-TTS Voice Design generates a voice from a text description rather than
     a fixed preset, so each character's `voice_desc` becomes a distinct voice.
-    Audio plays in a background thread so the prompt returns immediately.
+
+    Synthesis and playback each run in a background thread: `speak()` returns
+    immediately, so one character's TTS round trip overlaps with the next
+    character's LLM generation instead of serializing the whole scene.
     """
 
     def __init__(self, config: TARSConfig):
@@ -45,6 +48,13 @@ class TARSVoice:
         self.output_dir = Path(config.audio_output_dir)
         self.output_dir.mkdir(exist_ok=True)
         self._utterance_count = 0
+
+        # Background synthesis queue + thread
+        self._synth_queue: queue.Queue[tuple | None] = queue.Queue()
+        self._synth_thread = threading.Thread(
+            target=self._synth_worker, daemon=True
+        )
+        self._synth_thread.start()
 
         # Background playback queue + thread
         self._playback_queue: queue.Queue[tuple[Path, bool] | None] = queue.Queue()
@@ -74,6 +84,11 @@ class TARSVoice:
             return None
 
         use_desc = voice_desc or self.config.tts.voice_desc
+        if not use_desc:
+            raise ValueError(
+                "No voice description provided and no default configured. "
+                "Pass voice_desc or set config.tts.voice_desc."
+            )
         use_speed = speed or self.config.tts.speed
         fmt = self.config.tts.response_format or "wav"
 
@@ -176,32 +191,57 @@ class TARSVoice:
         else:
             raise RuntimeError(f"Unsupported platform: {system}")
 
+    def _synth_worker(self) -> None:
+        """Background thread: synthesize queued utterances, then queue playback."""
+        while True:
+            item = self._synth_queue.get()
+            try:
+                if item is _SENTINEL:
+                    break
+                text, voice_desc, speed, on_synthesized = item
+                try:
+                    audio_path = self.synthesize(text, voice_desc=voice_desc, speed=speed)
+                except Exception as e:
+                    print(f"  [TARS] Voice error: {e}")
+                    continue
+                if audio_path and self.config.play_audio:
+                    self.play(audio_path, delete_after=not self.config.save_audio)
+                elif audio_path and not self.config.save_audio:
+                    audio_path.unlink(missing_ok=True)
+                    audio_path = None
+                if audio_path and on_synthesized:
+                    on_synthesized(audio_path)
+            finally:
+                self._synth_queue.task_done()
+
     def speak(
         self,
         text: str,
         voice_desc: Optional[str] = None,
         speed: Optional[float] = None,
-    ) -> Optional[Path]:
+        on_synthesized=None,
+    ) -> None:
         """
-        Full pipeline: synthesize via OMLX -> enqueue for background playback.
+        Full pipeline, fully asynchronous: enqueue for background synthesis,
+        then background playback. Returns immediately — the next character's
+        LLM generation can start while this utterance is still being synthesized.
 
-        Returns immediately after synthesis. Audio plays in a background thread.
+        Args:
+            text: Text to synthesize.
+            voice_desc: Voice description override (defaults to config value).
+            speed: TTS speed override (defaults to config value).
+            on_synthesized: Optional callback invoked with the audio Path once
+                            synthesis succeeds and the file is being kept.
         """
-        audio_path = self.synthesize(text, voice_desc=voice_desc, speed=speed)
-        if audio_path and self.config.play_audio:
-            delete_after = not self.config.save_audio
-            self.play(audio_path, delete_after=delete_after)
-        elif audio_path and not self.config.save_audio:
-            audio_path.unlink(missing_ok=True)
-            return None
-        return audio_path
+        self._synth_queue.put((text, voice_desc, speed, on_synthesized))
 
     def wait(self) -> None:
-        """Block until all queued audio has finished playing."""
+        """Block until all queued synthesis and playback has finished."""
+        self._synth_queue.join()
         self._playback_queue.join()
 
     def cleanup(self) -> None:
-        """Wait for playback to finish, then remove all generated audio files."""
-        self._playback_queue.join()
+        """Wait for synthesis/playback to finish, then remove all generated audio."""
+        self.wait()
         for f in self.output_dir.glob("tts_*"):
             f.unlink(missing_ok=True)

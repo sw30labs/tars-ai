@@ -20,18 +20,15 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import time
-from pathlib import Path
 
-from rich.console import Console
-from rich.panel import Panel
+from rich.markup import escape
 
 from config.settings import TARSConfig, TARSPersonality, OMLXConfig, TTSConfig
 from core.agent import TARSAgent
+from core.characters import CHARACTER_REGISTRY
 from tts.engine import TARSVoice
-
-
-console = Console()
+import ui
+from ui import console
 
 
 # ── CLI Argument Parsing ─────────────────────────────────────────────────
@@ -89,6 +86,12 @@ Each character has a built-in voice description. Use --voice-desc to override TA
         help="Request timeout in seconds (default: 1800). OMLX loads models on demand, "
              "so the first request after a cold start can be slow."
     )
+    parser.add_argument(
+        "--thinking", action="store_true",
+        help="Enable Qwen hybrid-thinking / chain-of-thought (off by default). "
+             "When off, OMLX gets chat_template_kwargs.enable_thinking=false so "
+             "replies stay short and TTS-clean."
+    )
 
     # TTS (served by OMLX, same server as the LLM)
     parser.add_argument(
@@ -99,10 +102,11 @@ Each character has a built-in voice description. Use --voice-desc to override TA
     )
     parser.add_argument(
         "--voice-desc", type=str,
-        default="A deep, measured, authoritative American male voice. Military precision. Deliberate pauses.",
-        help="Voice description for Qwen3-TTS Voice Design (TARS default voice)"
+        default=None,
+        help="Voice description for Qwen3-TTS Voice Design "
+             "(default: TARS's built-in voice, see core/characters.py)"
     )
-    parser.add_argument("--speed", type=float, default=1.0, help="TTS speed (default: 1.0)")
+    parser.add_argument("--speed", type=float, default=None, help="TTS speed (default: 1.0)")
 
     # Output
     parser.add_argument("--no-voice", action="store_true", help="Text-only mode, no audio")
@@ -111,67 +115,46 @@ Each character has a built-in voice description. Use --voice-desc to override TA
     return parser.parse_args()
 
 
-# ── Boot Sequence ────────────────────────────────────────────────────────
+# ── Character turn callbacks ─────────────────────────────────────────────
 
-def print_boot_sequence(config: TARSConfig):
-    """TARS-style boot animation."""
+def _on_character_start(indicator: ui.ProcessingIndicator, char) -> None:
+    """First non-silent token: kill the PROCESSING readout, print the tag."""
+    indicator.stop()
+    console.print(ui.name_tag(char) + " ", end="")
 
-    boot_text = """
- ╔══════════════════════════════════════════════════════════╗
- ║                                                          ║
- ║   ████████╗ █████╗ ██████╗ ███████╗     █████╗ ██╗       ║
- ║   ╚══██╔══╝██╔══██╗██╔══██╗██╔════╝    ██╔══██╗██║       ║
- ║      ██║   ███████║██████╔╝███████╗    ███████║██║       ║
- ║      ██║   ██╔══██║██╔══██╗╚════██║    ██╔══██║██║       ║
- ║      ██║   ██║  ██║██║  ██║███████║    ██║  ██║██║       ║
- ║      ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝    ╚═╝  ╚═╝╚═╝       ║
- ║                                                          ║
- ║   Tactical Autonomous Robotic System                     ║
- ║   USMC Serial: TARS-001  |  MLX Native                   ║
- ║                                                          ║
- ╚══════════════════════════════════════════════════════════╝"""
 
-    console.print(boot_text, style="bold cyan")
+def _on_character_end(
+    indicator: ui.ProcessingIndicator,
+    char,
+    text: str,
+    agent: TARSAgent,
+    voice: TARSVoice | None,
+    config: TARSConfig,
+) -> None:
+    """End of a character's response: newline, tok/s readout, TTS."""
+    console.print()  # newline after streaming
 
-    # Simulated boot log
-    boot_steps = [
-        ("Initializing neural matrix", 0.3),
-        ("Loading personality parameters", 0.2),
-        (f"  Humor: {config.personality.humor}%", 0.1),
-        (f"  Honesty: {config.personality.honesty}%", 0.1),
-        (f"  Discretion: {config.personality.discretion}%", 0.1),
-        (f"  Trust: {config.personality.trust}%", 0.1),
-        (f"LLM: {config.omlx.model} via OMLX @ {config.omlx.server_url}", 0.2),
-        (f"TTS: {config.tts.model} (Voice Design) via OMLX @ {config.tts.speed}x", 0.2),
-        ("Runtime: OMLX server (LLM + TTS)", 0.2),
-        ("Articulation servos: online", 0.2),
-        ("Crew manifest: Brand, Dr. Mann, Prof. Brand, Murphy — standing by", 0.2),
-        ("All systems nominal", 0.3),
-    ]
+    tps = agent.llm.last_generation_tps
+    if tps > 0:
+        ui.tps_readout(tps)
 
-    for step, delay in boot_steps:
-        time.sleep(delay)
-        if step.startswith("  "):
-            console.print(f"  [dim]{step}[/dim]")
-        else:
-            console.print(f"  [green]>[/green] {step}")
-
-    console.print()
-    p = config.personality
-    console.print(
-        Panel(
-            f"[bold]TARS online.[/bold] {p.summary()}\n\n"
-            f"[dim]Commands: 'quit' to exit | 'reset' to clear history | "
-            f"'set humor to N' to adjust personality | 'settings' to view\n"
-            f"'save [name]' to save session | 'load <name>' to restore | "
-            f"'history' to list saved sessions\n"
-            f"'call <name>' to summon crew | 'dismiss <name>' to send away | "
-            f"'who\\'s here?' to check roster\n"
-            f"Crew: Brand, Dr. Mann, Prof. Brand, Murphy[/dim]",
-            border_style="cyan",
+    # Speak with the character's voice — synthesis runs in the background so
+    # the next character's LLM generation starts immediately. Errors are
+    # reported by the synthesis worker.
+    if voice:
+        voice.speak(
+            text,
+            voice_desc=char.voice_desc,
+            speed=char.speed,
+            on_synthesized=(
+                (lambda p: console.print(f"\n  [dim]Audio: {p}[/dim]"))
+                if config.save_audio else None
+            ),
         )
-    )
-    console.print()
+
+    # Another character may be up next — bring the readout back until they
+    # start streaming (stopped again in _on_character_start / after the round).
+    indicator.start()
 
 
 # ── Main Loop ────────────────────────────────────────────────────────────
@@ -194,13 +177,10 @@ def main():
         max_tokens=args.max_tokens,
         temperature=args.temp,
         request_timeout=args.timeout,
+        enable_thinking=args.thinking,
     )
 
-    tts_config = TTSConfig(
-        model=args.tts_model,
-        voice_desc=args.voice_desc,
-        speed=args.speed,
-    )
+    tts_config = TTSConfig(model=args.tts_model)
 
     config = TARSConfig(
         personality=personality,
@@ -210,29 +190,37 @@ def main():
         save_audio=not args.no_save,
     )
 
+    # CLI voice overrides apply to TARS's character entry — the per-character
+    # registry values are what actually reach the synthesizer.
+    if args.voice_desc:
+        CHARACTER_REGISTRY["tars"].voice_desc = args.voice_desc
+        config.tts.voice_desc = args.voice_desc  # fallback for desc-less calls
+    if args.speed is not None:
+        CHARACTER_REGISTRY["tars"].speed = args.speed
+        config.tts.speed = args.speed
+
     # Validate
     try:
         config.validate()
-    except (ValueError, EnvironmentError) as e:
-        console.print(f"[red]Configuration error:[/red] {e}")
+    except ValueError as e:
+        ui.alert(f"Configuration error: {e}")
         sys.exit(1)
 
-    # Boot
-    print_boot_sequence(config)
+    # Boot — USMC field reactivation sequence
+    ui.print_boot(config)
 
     # Initialize LLM (OMLX client — the connection is lazy; the model loads on
     # the first chat, so that request can be slow after a cold start).
-    console.print(f"  [yellow]Connecting to OMLX server at {config.omlx.server_url}...[/yellow]")
+    ui.dim(f"Establishing uplink to OMLX @ {config.omlx.server_url} ...")
     try:
         agent = TARSAgent(config)
-        console.print("  [green]>[/green] OMLX client ready")
-        console.print(
-            f"  [dim]Model '{config.omlx.model}' loads on demand — first reply may be slow.[/dim]\n"
-        )
+        ui.ok("OMLX uplink established")
+        ui.dim(f"'{config.omlx.model}' loads on demand — first reply may be slow.")
+        console.print()
     except Exception as e:
-        console.print(f"[red]LLM init failed:[/red] {e}")
-        console.print(f"[dim]Ensure OMLX is running and serving '{config.omlx.model}'.[/dim]")
-        console.print(f"[dim]Dashboard: {config.omlx.dashboard_url}[/dim]")
+        ui.alert(f"Uplink failed: {e}")
+        ui.dim(f"Ensure OMLX is running and serving '{config.omlx.model}'.")
+        ui.dim(f"Dashboard: {config.omlx.dashboard_url}")
         sys.exit(1)
 
     # Initialize TTS (OMLX audio client — synthesis happens on the OMLX server)
@@ -241,19 +229,22 @@ def main():
         try:
             voice = TARSVoice(config)
         except Exception as e:
-            console.print(f"[yellow]Voice init failed: {e}[/yellow]")
-            console.print("[yellow]Falling back to text-only mode.[/yellow]")
+            ui.warn(f"Voice init failed: {e}")
+            ui.warn("Falling back to text-only mode.")
             voice = None
+
+    indicator = ui.ProcessingIndicator()
 
     # Conversation loop
     while True:
         try:
-            user_input = console.input("[bold white]Cooper>[/bold white] ").strip()
+            user_input = console.input(ui.prompt()).strip()
         except (EOFError, KeyboardInterrupt):
-            console.print("\n[cyan]TARS:[/cyan] See you on the other side, Cooper.")
+            console.print()
+            ui.say_tars("See you on the other side, Cooper.")
             if voice:
                 voice.wait()
-            agent._save_conversation("autosave")
+            agent.save_conversation("autosave")
             break
 
         if not user_input:
@@ -261,21 +252,21 @@ def main():
 
         # Meta commands
         if user_input.lower() in ("quit", "exit", "q"):
-            console.print("[cyan]TARS:[/cyan] Don't let me leave, Murph.")
+            ui.say_tars("Don't let me leave, Murph.")
             if voice:
                 voice.wait()
-            agent._save_conversation("autosave")
+            agent.save_conversation("autosave")
             break
 
         if user_input.lower() == "reset":
             agent.reset()
-            console.print("[cyan]TARS:[/cyan] Memory cleared. Starting fresh.")
+            ui.say_tars("Memory cleared. Starting fresh.")
             continue
 
         if user_input.lower() == "cleanup":
             if voice:
                 voice.cleanup()
-            console.print("[cyan]TARS:[/cyan] Audio files purged.")
+            ui.say_tars("Audio files purged.")
             continue
 
         # Check for registered commands (settings, persistence, character management)
@@ -283,61 +274,36 @@ def main():
             user_input, agent.config, agent._command_context()
         )
         if cmd_response:
-            console.print(f"[bold cyan]TARS:[/bold cyan] {cmd_response}")
+            console.print(f"{ui.tars_tag()} {cmd_response}")
             console.print()
             continue
 
         # Multi-character generation round
+        indicator.start()
         try:
             responses = agent.orchestrator.generate_round(
                 user_input,
-                on_character_start=lambda char: console.print(
-                    f"[{char.color_style}]{char.display_name}:[/{char.color_style}] ",
-                    end="",
-                ),
+                on_character_start=lambda char: _on_character_start(indicator, char),
                 on_character_token=lambda cid, tok: console.print(
-                    tok, end="", highlight=False
+                    escape(tok), end="", highlight=False
                 ),
-                on_character_end=lambda char, text: _handle_character_end(
-                    char, text, agent, voice, config
+                on_character_end=lambda char, text: _on_character_end(
+                    indicator, char, text, agent, voice, config
                 ),
             )
 
             # If all characters were silent (shouldn't happen since TARS never is)
             if all(r.silent for r in responses):
-                console.print("[dim]...[/dim]")
+                console.print(f"[{ui.STYLE_DIM}]...[/{ui.STYLE_DIM}]")
 
         except Exception as e:
             console.print()
-            console.print(f"[red]Error:[/red] {e}")
+            ui.alert(str(e))
             continue
+        finally:
+            indicator.stop()
 
         console.print()
-
-
-def _handle_character_end(
-    char,
-    text: str,
-    agent: TARSAgent,
-    voice: TARSVoice | None,
-    config: TARSConfig,
-):
-    """Handle end of a character's response: newline, TPS, TTS."""
-    console.print()  # newline after streaming
-
-    # Show tokens/sec
-    tps = agent.llm.last_generation_tps
-    if tps > 0:
-        console.print(f"  [dim]{tps:.1f} tokens/sec[/dim]")
-
-    # Speak with character's voice
-    if voice:
-        try:
-            audio_path = voice.speak(text, voice_desc=char.voice_desc, speed=char.speed)
-            if audio_path and config.save_audio:
-                console.print(f"  [dim]Audio: {audio_path}[/dim]")
-        except Exception as e:
-            console.print(f"  [dim yellow]Voice error: {e}[/dim yellow]")
 
 
 if __name__ == "__main__":

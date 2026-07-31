@@ -8,14 +8,37 @@ Each session is a JSON file with messages, personality, and metadata.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
+from rich.markup import escape
 
 
 CONVERSATIONS_DIR = Path(__file__).resolve().parent.parent / "conversations"
+
+# Session names become filenames — allow only filename-safe characters
+# (letters, digits, spaces, dashes, underscores). Anything else (path
+# separators, dots) is rejected to prevent path traversal.
+_SAFE_NAME = re.compile(r"^[\w\- ]+$", re.UNICODE)
+
+
+def is_valid_name(name: str) -> bool:
+    """Check whether a session name is safe to use as a filename."""
+    return bool(name) and bool(_SAFE_NAME.match(name))
+
+
+def _sanitize_name(name: str) -> str:
+    """Validate a session name for use as a filename. Raises ValueError."""
+    name = name.strip()
+    if not is_valid_name(name):
+        raise ValueError(
+            f"Invalid session name {escape(name)!r}. "
+            "Use letters, numbers, spaces, dashes or underscores only."
+        )
+    return name
 
 
 def _message_to_dict(msg: BaseMessage) -> dict:
@@ -69,7 +92,11 @@ def save_conversation(
 
     Returns:
         Path to the saved file.
+
+    Raises:
+        ValueError: If the session name isn't filename-safe.
     """
+    name = _sanitize_name(name)
     CONVERSATIONS_DIR.mkdir(exist_ok=True)
 
     data = {
@@ -93,8 +120,11 @@ def load_conversation(name: str) -> Optional[dict]:
 
     Returns:
         Dict with keys: messages, personality, context_summary, name, saved_at.
-        None if the file doesn't exist.
+        None if the file doesn't exist or the name isn't filename-safe.
     """
+    name = name.strip()
+    if not is_valid_name(name):
+        return None
     filepath = CONVERSATIONS_DIR / f"{name}.json"
     if not filepath.exists():
         return None

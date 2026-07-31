@@ -3,7 +3,6 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![OMLX](https://img.shields.io/badge/LLM%2BTTS-OMLX%20server-FF6F00)
 ![Server](https://img.shields.io/badge/OMLX%20host-Apple%20Silicon-000000?logo=apple&logoColor=white)
-![LangGraph](https://img.shields.io/badge/LangGraph-Agent-1C3C3C)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Local Only](https://img.shields.io/badge/Cloud-None%20%7C%20Fully%20Local-blue)
 
@@ -11,7 +10,7 @@
 
 <img src="images/1.png" width="60%" />
 
-A LangGraph-powered conversational AI that embodies TARS from Interstellar.
+A conversational AI that embodies TARS from Interstellar.
 Text in, TARS voice out. Both the LLM **and** the TTS run on your local **OMLX**
 server (an OpenAI-compatible MLX inference server) — the LLM via
 `/v1/chat/completions`, the voice via `/v1/audio/speech`. No cloud APIs, and
@@ -23,10 +22,11 @@ nothing downloads to the client: both models live on your OMLX box.
 ┌───────────────────────────────────────────────────────┐
 │                      TARS-AI CLI                      │
 ├───────────────────────────────────────────────────────┤
-│                 LangGraph Agent Graph                 │
+│  Command registry (settings / save / crew commands)   │
+│  ConversationOrchestrator (multi-character turns)     │
 │  ┌────────────┐  ┌─────────────┐  ┌────────────────┐  │
-│  │ Personality →   LLM Node     →   Voice Output   │  │
-│  │  Injector  │  │ OpenAI SDK  │  │  OpenAI SDK    │  │
+│  │ Personality →   OMLXLLM      →   TARSVoice      │  │
+│  │  prompt    │  │ OpenAI SDK  │  │  OpenAI SDK    │  │
 │  └────────────┘  └──────┬──────┘  └───────┬────────┘  │
 └─────────────────────────┼─────────────────┼───────────┘
    /v1/chat/completions   │                 │  /v1/audio/speech
@@ -38,6 +38,9 @@ nothing downloads to the client: both models live on your OMLX box.
         │   dashboard: /admin/dashboard           │
         └─────────────────────────────────────────┘
 ```
+
+TTS synthesis runs in a background thread, so one character's voice renders
+while the next character is already generating.
 
 ## Quick Start
 
@@ -86,8 +89,8 @@ Design** — voices are generated from a text *description* rather than fixed
 presets. TARS's description is sent as the OpenAI `instructions` field, which
 oMLX routes to the model's `instruct`. TARS's default:
 
-> "A deep, measured, authoritative American male voice. Military precision.
-> Deliberate pauses."
+> "A deep, measured, authoritative American male voice. Military robot.
+> Deliberate, clipped delivery. Deadpan."
 
 Override it with `--voice-desc "..."`. Each crew character carries its own voice
 description, so summoned guests (Brand, Dr. Mann, Prof. Brand, Murphy) sound distinct.
@@ -103,7 +106,8 @@ the [strix-omlx](https://github.com/sw30labs/strix-omlx) convention):
 | `--tts-model` | `OMLX_TTS_MODEL`               | `Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16`           |
 | `--omlx-url`  | `OMLX_URL` / `LLM_API_BASE`    | `http://127.0.0.1:8000/v1`                       |
 | `--api-key`   | `OMLX_API_KEY` / `LLM_API_KEY` | `test`                                           |
-| `--voice-desc`| —                              | TARS's default voice description                 |
+| `--voice-desc`| —                              | TARS's built-in voice description (`core/characters.py`) |
+| `--speed`     | —                              | `1.0`                                          |
 | `--timeout`   | —                              | `1800` (seconds; covers on-demand model load)    |
 
 ## Models
@@ -123,3 +127,10 @@ v0.3.0+, which added the `/v1/audio/speech` endpoint.)
 - A running **OMLX** server (v0.3.0+) serving both the LLM and a Qwen3-TTS model.
 - Python 3.10+ on the client — **any OS**; no MLX / Apple Silicon needed client-side.
 - For audio: a working output device (`sounddevice`, or `afplay`/`mpv`/`ffplay`). Use `--no-voice` to skip.
+
+## Tests
+
+```bash
+pip install pytest
+pytest            # 59 unit tests: commands, orchestrator, persistence, settings
+```

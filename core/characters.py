@@ -10,6 +10,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+# Canonical TARS voice — the single source of truth. The CLI --voice-desc
+# flag overrides this registry entry at startup (see main.py).
+TARS_VOICE_DESC = (
+    "A deep, measured, authoritative American male voice. "
+    "Military robot. Deliberate, clipped delivery. Deadpan."
+)
+
+
 @dataclass
 class Character:
     """A crew member with distinct personality, voice, and system prompt."""
@@ -205,7 +213,7 @@ CHARACTER_REGISTRY: dict[str, Character] = {
     "tars": Character(
         id="tars",
         display_name="TARS",
-        voice_desc="A deep, measured, authoritative American male voice. Military robot. Deliberate, clipped delivery. Deadpan.",
+        voice_desc=TARS_VOICE_DESC,
         speed=1.0,
         color_style="bold cyan",
         system_prompt="",  # Built dynamically from prompts.yaml + personality knobs
