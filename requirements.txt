@@ -3,19 +3,19 @@
 # The client itself needs no MLX / Apple Silicon — only audio playback.
 
 # ── OMLX server client (OpenAI-compatible: chat + /v1/audio/speech) ──
-openai>=1.0.0                    # Client for the local OMLX server (Bearer-auth /v1)
+openai==3.45.0  # Client for the local OMLX server (Bearer-auth /v1)
 
 # ── Message types ──
-langchain-core>=0.3.0            # Message types & base abstractions
+langchain-core==1.7.4  # Message types & base abstractions
 
 # ── Audio playback (local, cross-platform) ──
-sounddevice>=0.4.6               # Audio playback
-soundfile>=0.12.1                # Reads the WAV returned by OMLX
-numpy>=1.24.0                    # Array backing for sounddevice/soundfile
+sounddevice==0.5.6  # Audio playback
+soundfile==0.14.0  # Reads the WAV returned by OMLX
+numpy==2.5.4  # Array backing for sounddevice/soundfile
 
 # ── UI & Config ──
-rich>=13.0.0                     # Console UI / pretty printing
-pyyaml>=6.0                      # Prompt template loading
+rich==15.0.0  # Console UI / pretty printing
+pyyaml==6.0.3  # Prompt template loading
 
 # ── Testing ──
-pytest>=7.0                      # Unit tests (tests/)
+pytest==9.2.0  # Unit tests (tests/)
