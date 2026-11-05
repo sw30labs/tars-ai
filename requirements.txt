@@ -19,3 +19,4 @@ pyyaml==6.0.3  # Prompt template loading
 
 # ── Testing ──
 pytest==9.2.0  # Unit tests (tests/)
+requests==2.33.0  # VulnOps CVE-2026-25645: transitive dependency floor
