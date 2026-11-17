@@ -19,3 +19,4 @@ pyyaml==6.0.3  # Prompt template loading
 
 # ── Testing ──
 pytest==9.2.0  # Unit tests (tests/)
+orjson==3.11.5  # VulnOps CVE-2025-67221: transitive dependency floor
